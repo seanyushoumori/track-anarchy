@@ -1,7 +1,7 @@
 {
   "id": "track-anarchy",
   "name": "Track Anarchy",
-  "description": "Lifts Subway Builder's build limits — sharper curves, near-vertical grades, zero track/station/tunnel clearance, overlapping parallel tracks, at-grade road crossings, any-size stations, and an effectively unlimited build-height range. Enable it and build (almost) anything.",
+  "description": "Take the guardrails off. Track Anarchy removes Subway Builder's construction limits for every train type: minimum curve radius (track and stations), maximum grade, track/station/tunnel clearance, minimum parallel-track spacing, the build-height floor and ceiling, the building-foundation gap, minimum and maximum station lengths, minimum and maximum track segment lengths, and at-grade road-crossing barriers. A few rules stay hardcoded and can't be removed — stations must start and end level, different track types can't connect, there's no building or track overlap, and airport runways/taxiways still block at-grade crossings. Built on the official modding API; turn it off anytime to return to vanilla.",
   "version": "1.0.0",
   "author": {
     "name": "abadsinger"
