@@ -1,0 +1,30 @@
+{
+  "name": "track-anarchy",
+  "version": "1.0.0",
+  "description": "Lifts Subway Builder's build limits — curves, grades, clearance, spacing, station size, and build-height range.",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "dev": "concurrently -k -n build,game -c blue,green \"vite build --watch\" \"tsx scripts/run.ts\"",
+    "dev:link": "tsx scripts/link.ts",
+    "dev:unlink": "tsx scripts/link.ts --unlink",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "subway-builder",
+    "mod"
+  ],
+  "author": "abadsinger",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^25.0.9",
+    "@types/react": "^19.2.9",
+    "concurrently": "^9.2.1",
+    "maplibre-gl": "^5.18.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.9.3",
+    "vite": "npm:rolldown-vite@latest",
+    "vite-plugin-static-copy": "^3.0.0"
+  }
+}

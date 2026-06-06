@@ -1,0 +1,13 @@
+{
+  "id": "track-anarchy",
+  "name": "Track Anarchy",
+  "description": "Lifts Subway Builder's build limits — sharper curves, near-vertical grades, zero track/station/tunnel clearance, overlapping parallel tracks, at-grade road crossings, any-size stations, and an effectively unlimited build-height range. Enable it and build (almost) anything.",
+  "version": "1.0.0",
+  "author": {
+    "name": "abadsinger"
+  },
+  "main": "index.js",
+  "dependencies": {
+    "subway-builder": "^1.0.0"
+  }
+}
