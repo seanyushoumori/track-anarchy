@@ -12,7 +12,7 @@
  * record a value that already equals our anarchy value.
  */
 
-const MOD_VERSION = '1.1.0';
+const MOD_VERSION = '1.1.1';
 const TAG = '[Track Anarchy]';
 const STORAGE_KEY = 'track-anarchy:enabled';
 // 'settings-menu' = in-game + startup settings; 'main-menu' = directly on the home screen
@@ -216,8 +216,20 @@ if (!api) {
       'div',
       { style: { padding: '8px 0' } },
       h('div', { style: { fontWeight: 600, marginBottom: '6px' } }, 'Track Anarchy — build limits'),
+      h(
+        'div',
+        {
+          style: {
+            fontSize: '11px',
+            fontWeight: 700,
+            color: '#fbbf24',
+            marginBottom: '8px',
+            whiteSpace: 'nowrap',
+          },
+        },
+        'IMPORTANT: game must be restarted for settings to apply.',
+      ),
       ...LEVERS.map(row),
-      h('div', { style: { fontSize: '11px', opacity: 0.6, marginTop: '6px' } }, 'Some changes take effect on the next city load.'),
     );
   };
 

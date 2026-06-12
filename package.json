@@ -1,6 +1,6 @@
 {
   "name": "track-anarchy",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Lifts Subway Builder's build limits — curves, grades, clearance, spacing, station size, and build-height range.",
   "main": "dist/index.js",
   "type": "module",
