@@ -12,7 +12,7 @@
  * record a value that already equals our anarchy value.
  */
 
-const MOD_VERSION = '1.1.1';
+const MOD_VERSION = '1.2.0';
 const TAG = '[Track Anarchy]';
 const STORAGE_KEY = 'track-anarchy:enabled';
 // 'settings-menu' = in-game + startup settings; 'main-menu' = directly on the home screen
@@ -39,7 +39,10 @@ const LEVERS: Lever[] = [
   { id: 'elevation', label: 'Unlimited build height', constants: { MIN_ELEVATION: -1_000_000, MAX_ELEVATION: 1_000_000 } },
   { id: 'collision', label: 'Station & tunnel collision', constants: { STATION_HEIGHT: 0, TUNNEL_HEIGHT: 0 } },
   { id: 'foundations', label: 'Build under buildings', constants: { BUILDING_FOUNDATION_GAP: 0 } },
-  { id: 'trackLength', label: 'Any track segment length', constants: { MIN_TRACK_LENGTH: 1, MAX_TRACK_LENGTH: 1_000_000 } },
+  // 1.4.x split the minimum-length limit into three constants (single / normal /
+  // advanced track modes); 1.3.x had only MIN_TRACK_LENGTH. Setting all of them is
+  // harmless on older versions — non-existent constants are filtered out in applyAll.
+  { id: 'trackLength', label: 'Any track segment length', constants: { MIN_TRACK_LENGTH: 1, MIN_SINGLE_TRACK_LENGTH: 1, MIN_ADVANCED_TRACK_LENGTH: 1, MAX_TRACK_LENGTH: 1_000_000 } },
 ];
 
 /** Hardcoded vanilla constant values — we can't read these back reliably (anarchy writes persist). */
@@ -50,6 +53,8 @@ const DEFAULT_CONSTANTS: Record<string, number> = {
   TUNNEL_HEIGHT: 5,
   BUILDING_FOUNDATION_GAP: 3,
   MIN_TRACK_LENGTH: 10,
+  MIN_SINGLE_TRACK_LENGTH: 10, // 1.4.x
+  MIN_ADVANCED_TRACK_LENGTH: 10, // 1.4.x
   MAX_TRACK_LENGTH: 10000,
 };
 
@@ -72,10 +77,13 @@ if (!api) {
   console.log(`${TAG} v${MOD_VERSION} | API v${api.version}`);
 
   const trains = api.trains as unknown as {
-    getTrainTypes?: () => Record<string, { stats?: Record<string, number>; allowAtGradeRoadCrossing?: boolean }>;
+    getTrainTypes?: () => Record<string, { stats?: Record<string, number>; allowGradeCrossing?: boolean; allowAtGradeRoadCrossing?: boolean }>;
     modifyTrainType?: (id: string, updates: unknown) => void;
   };
   const root = api as unknown as { modifyConstants?: (c: Record<string, number>) => void };
+  // Read the live constant set so we only write keys this game version actually has
+  // (the length-constant names differ between 1.3.x and 1.4.x). Absent → don't filter.
+  const getConstants = (api.utils as unknown as { getConstants?: () => Record<string, number> }).getConstants;
   const store = api.storage as unknown as { get?: (k: string) => unknown; set?: (k: string, v: unknown) => void };
   const ui = api.ui as unknown as {
     registerComponent?: (p: string, o: { id: string; component: unknown }) => void;
@@ -104,7 +112,7 @@ if (!api) {
   const origStats: Record<string, Record<string, number>> = {}; // [trainId][statKey] = clean default
   const origRoad: Record<string, boolean> = {};
 
-  const captureStats = (types: Record<string, { stats?: Record<string, number>; allowAtGradeRoadCrossing?: boolean }>): void => {
+  const captureStats = (types: Record<string, { stats?: Record<string, number>; allowGradeCrossing?: boolean; allowAtGradeRoadCrossing?: boolean }>): void => {
     for (const id of Object.keys(types)) {
       const stats = types[id]?.stats ?? {};
       origStats[id] = origStats[id] ?? {};
@@ -117,7 +125,9 @@ if (!api) {
           if (typeof v === 'number' && v !== lever.stats[k]) origStats[id][k] = v;
         }
       }
-      if (origRoad[id] == null) origRoad[id] = types[id]?.allowAtGradeRoadCrossing ?? false;
+      // 1.4.x renamed allowAtGradeRoadCrossing → allowGradeCrossing (the build
+      // validation still reads the old name too). Capture from whichever exists.
+      if (origRoad[id] == null) origRoad[id] = types[id]?.allowGradeCrossing ?? types[id]?.allowAtGradeRoadCrossing ?? false;
     }
   };
 
@@ -131,11 +141,20 @@ if (!api) {
     captureStats(types);
 
     // Global constants — restore from the hardcoded table (reads are contaminated).
+    // Skip constants that don't exist in this game version so a mixed 1.3.x/1.4.x
+    // lever (e.g. the three track-length keys) stays backwards compatible.
+    let liveConstants: Record<string, number> | null = null;
+    try {
+      liveConstants = getConstants?.() ?? null;
+    } catch {
+      liveConstants = null;
+    }
     const constants: Record<string, number> = {};
     for (const lever of LEVERS) {
       if (!lever.constants) continue;
       const on = enabled.has(lever.id);
       for (const k of Object.keys(lever.constants)) {
+        if (liveConstants && !(k in liveConstants)) continue; // this version lacks the constant
         constants[k] = on ? lever.constants[k] : DEFAULT_CONSTANTS[k] ?? lever.constants[k];
       }
     }
@@ -164,10 +183,16 @@ if (!api) {
           }
         }
       }
-      const update: { stats: Record<string, number>; allowAtGradeRoadCrossing?: boolean } = {
+      const update: { stats: Record<string, number>; allowGradeCrossing?: boolean; allowAtGradeRoadCrossing?: boolean } = {
         stats: { ...cur, ...statUpdates },
       };
-      if (roadLever) update.allowAtGradeRoadCrossing = enabled.has(roadLever.id) ? true : origRoad[id] ?? false;
+      if (roadLever) {
+        const on = enabled.has(roadLever.id) ? true : origRoad[id] ?? false;
+        // Set BOTH names: allowGradeCrossing (1.4.x, shown in the Train Types panel)
+        // and allowAtGradeRoadCrossing (1.3.x + the 1.4.x road-intersection validator).
+        update.allowGradeCrossing = on;
+        update.allowAtGradeRoadCrossing = on;
+      }
       try {
         trains.modifyTrainType?.(id, update);
       } catch (err) {
