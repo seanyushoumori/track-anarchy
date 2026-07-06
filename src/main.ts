@@ -12,9 +12,15 @@
  * record a value that already equals our anarchy value.
  */
 
-const MOD_VERSION = '1.2.0';
+const MOD_VERSION = '1.2.1';
 const TAG = '[Track Anarchy]';
 const STORAGE_KEY = 'track-anarchy:enabled';
+// The game keeps modified train-type stats across a reload, but this mod's module
+// re-executes and loses its in-memory captured defaults — so after a reload it can't
+// tell a relaxed value from a real default and stats that lack a hardcoded fallback
+// (station lengths) never revert. Persist the captured defaults so they survive.
+const ORIG_STATS_KEY = 'track-anarchy:origStats';
+const ORIG_ROAD_KEY = 'track-anarchy:origRoad';
 // 'settings-menu' = in-game + startup settings; 'main-menu' = directly on the home screen
 // (the settings sub-panel doesn't re-read registrations after a session, so we also mount on main-menu).
 const PLACEMENTS = ['settings-menu', 'main-menu'];
@@ -58,15 +64,27 @@ const DEFAULT_CONSTANTS: Record<string, number> = {
   MAX_TRACK_LENGTH: 10000,
 };
 
-/** Fallback vanilla stat defaults (global), used only if a clean per-train capture isn't available. */
+/**
+ * Fallback vanilla stat defaults, used only if a clean per-train capture isn't
+ * available (e.g. a soft reload happened before the async persist completed).
+ * Per-train first (values differ a lot — commuter-rail's minTurnRadius is 88, not
+ * 29 — so a single global table would revert the wrong way), then a global net.
+ * Measured from a fresh 1.4.5 launch; the captured/persisted value is authoritative
+ * and self-heals, so these only matter as a last resort.
+ */
+const STAT_FALLBACK_BY_TYPE: Record<string, Record<string, number>> = {
+  'heavy-metro': { minTurnRadius: 29, minStationTurnRadius: 400, maxSlopePercentage: 4, trackClearance: 1, parallelTrackSpacing: 3.81, maxLateralAcceleration: 1, minStationLength: 79, maxStationLength: 229 },
+  'light-metro': { minTurnRadius: 29, minStationTurnRadius: 400, maxSlopePercentage: 4, trackClearance: 1, parallelTrackSpacing: 3.81, maxLateralAcceleration: 1, minStationLength: 42.1, maxStationLength: 80.2 },
+  'commuter-rail': { minTurnRadius: 88, minStationTurnRadius: 1400, maxSlopePercentage: 3.5, trackClearance: 1.2, parallelTrackSpacing: 4.27, maxLateralAcceleration: 1, minStationLength: 108, maxStationLength: 368 },
+};
 const STAT_FALLBACK: Record<string, number> = {
   minTurnRadius: 29,
   minStationTurnRadius: 400,
   maxSlopePercentage: 4,
   trackClearance: 1,
   parallelTrackSpacing: 3.81,
-  maxLateralAcceleration: 0.8,
-  // minStationLength / maxStationLength: not known globally — rely on captured value
+  maxLateralAcceleration: 1,
+  // minStationLength / maxStationLength: vary per train — rely on per-type table + captured value
 };
 
 const api = window.SubwayBuilderAPI;
@@ -108,30 +126,51 @@ if (!api) {
     }
   };
 
-  // ---- captured per-train stat defaults (sentinel-guarded) ----
+  // ---- captured per-train stat defaults (sentinel-guarded + persisted) ----
   const origStats: Record<string, Record<string, number>> = {}; // [trainId][statKey] = clean default
   const origRoad: Record<string, boolean> = {};
 
+  const persistOrigs = (): void => {
+    try {
+      void store.set?.(ORIG_STATS_KEY, origStats);
+      void store.set?.(ORIG_ROAD_KEY, origRoad);
+    } catch {
+      /* ignore */
+    }
+  };
+
   const captureStats = (types: Record<string, { stats?: Record<string, number>; allowGradeCrossing?: boolean; allowAtGradeRoadCrossing?: boolean }>): void => {
+    let changed = false;
     for (const id of Object.keys(types)) {
       const stats = types[id]?.stats ?? {};
       origStats[id] = origStats[id] ?? {};
       for (const lever of LEVERS) {
         if (!lever.stats) continue;
         for (const k of Object.keys(lever.stats)) {
-          if (origStats[id][k] != null) continue; // already have a clean default
           const v = stats[k];
-          // sentinel guard: never record a value that already equals our anarchy value
-          if (typeof v === 'number' && v !== lever.stats[k]) origStats[id][k] = v;
+          // Sentinel guard: only trust a value that ISN'T our anarchy value — else
+          // it's one we wrote and reading it back would poison the saved default.
+          // A clean reading REFRESHES the default (self-heals if the game's changes),
+          // but a contaminated one leaves the previously-captured/persisted default intact.
+          if (typeof v === 'number' && v !== lever.stats[k] && origStats[id][k] !== v) {
+            origStats[id][k] = v;
+            changed = true;
+          }
         }
       }
       // 1.4.x renamed allowAtGradeRoadCrossing → allowGradeCrossing (the build
-      // validation still reads the old name too). Capture from whichever exists.
-      if (origRoad[id] == null) origRoad[id] = types[id]?.allowGradeCrossing ?? types[id]?.allowAtGradeRoadCrossing ?? false;
+      // validation still reads the old name too). Capture from whichever exists —
+      // once only (the flag has no reliable sentinel; the persisted value is authoritative).
+      if (origRoad[id] == null) {
+        origRoad[id] = types[id]?.allowGradeCrossing ?? types[id]?.allowAtGradeRoadCrossing ?? false;
+        changed = true;
+      }
     }
+    if (changed) persistOrigs();
   };
 
-  const statDefault = (id: string, k: string): number | undefined => origStats[id]?.[k] ?? STAT_FALLBACK[k];
+  const statDefault = (id: string, k: string): number | undefined =>
+    origStats[id]?.[k] ?? STAT_FALLBACK_BY_TYPE[id]?.[k] ?? STAT_FALLBACK[k];
 
   /** Apply the current selection: ON → relaxed value; OFF → vanilla default. */
   const applyAll = (): boolean => {
@@ -294,6 +333,37 @@ if (!api) {
     }
   };
 
+  // Load the persisted clean defaults BEFORE the user can toggle a lever off, so a
+  // revert after a reload uses the real defaults instead of the contaminated values.
+  // A fresh clean capture (full launch) wins over the persisted copy (self-heal).
+  const loadOrigs = (): void => {
+    try {
+      Promise.resolve(store.get?.(ORIG_STATS_KEY))
+        .then((saved) => {
+          if (!saved || typeof saved !== 'object') return;
+          for (const id of Object.keys(saved as Record<string, Record<string, number>>)) {
+            const savedForId = (saved as Record<string, Record<string, number>>)[id] ?? {};
+            origStats[id] = { ...savedForId, ...(origStats[id] ?? {}) }; // in-memory clean capture wins
+          }
+        })
+        .catch(() => {
+          /* ignore */
+        });
+      Promise.resolve(store.get?.(ORIG_ROAD_KEY))
+        .then((saved) => {
+          if (!saved || typeof saved !== 'object') return;
+          for (const id of Object.keys(saved as Record<string, boolean>)) {
+            if (origRoad[id] == null) origRoad[id] = (saved as Record<string, boolean>)[id];
+          }
+        })
+        .catch(() => {
+          /* ignore */
+        });
+    } catch {
+      /* ignore */
+    }
+  };
+
   // The settings panel doesn't survive the in-game ↔ main-menu transition on its
   // own, so re-register (idempotent) on every lifecycle event — notably onGameEnd
   // (exit to menu). Apply stats whenever a city is present.
@@ -314,6 +384,7 @@ if (!api) {
   };
 
   refreshUI();
+  loadOrigs();
   loadEnabled();
   api.hooks.onMapReady(async () => {
     refreshUI();
