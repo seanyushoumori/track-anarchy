@@ -12,7 +12,7 @@
  * record a value that already equals our anarchy value.
  */
 
-const MOD_VERSION = '1.2.1';
+const MOD_VERSION = '1.3.0';
 const TAG = '[Track Anarchy]';
 const STORAGE_KEY = 'track-anarchy:enabled';
 // The game keeps modified train-type stats across a reload, but this mod's module
@@ -21,6 +21,7 @@ const STORAGE_KEY = 'track-anarchy:enabled';
 // (station lengths) never revert. Persist the captured defaults so they survive.
 const ORIG_STATS_KEY = 'track-anarchy:origStats';
 const ORIG_ROAD_KEY = 'track-anarchy:origRoad';
+const ORIG_GCTPH_KEY = 'track-anarchy:origGcTph';
 // 'settings-menu' = in-game + startup settings; 'main-menu' = directly on the home screen
 // (the settings sub-panel doesn't re-read registrations after a session, so we also mount on main-menu).
 const PLACEMENTS = ['settings-menu', 'main-menu'];
@@ -31,6 +32,8 @@ interface Lever {
   stats?: Record<string, number>;
   constants?: Record<string, number>;
   roadCrossing?: boolean;
+  /** Lifts the ocean-floor build rule via the ocean depth detector. */
+  ocean?: boolean;
   /** Start disabled (most levers default on; this one doesn't). */
   defaultOff?: boolean;
 }
@@ -41,7 +44,8 @@ const LEVERS: Lever[] = [
   { id: 'clearance', label: 'Zero track clearance', stats: { trackClearance: 0 } },
   { id: 'spacing', label: 'Overlapping parallel tracks', stats: { parallelTrackSpacing: 0 }, defaultOff: true },
   { id: 'stationSize', label: 'Any station size', stats: { minStationLength: 1, maxStationLength: 1_000_000 } },
-  { id: 'roadCrossing', label: 'At-grade road crossings', roadCrossing: true },
+  { id: 'roadCrossing', label: 'At-grade road, highway & runway crossings', roadCrossing: true },
+  { id: 'oceanFloor', label: 'Build below the ocean floor', ocean: true },
   { id: 'elevation', label: 'Unlimited build height', constants: { MIN_ELEVATION: -1_000_000, MAX_ELEVATION: 1_000_000 } },
   { id: 'collision', label: 'Station & tunnel collision', constants: { STATION_HEIGHT: 0, TUNNEL_HEIGHT: 0 } },
   { id: 'foundations', label: 'Build under buildings', constants: { BUILDING_FOUNDATION_GAP: 0 } },
@@ -95,10 +99,119 @@ if (!api) {
   console.log(`${TAG} v${MOD_VERSION} | API v${api.version}`);
 
   const trains = api.trains as unknown as {
-    getTrainTypes?: () => Record<string, { stats?: Record<string, number>; allowGradeCrossing?: boolean; allowAtGradeRoadCrossing?: boolean }>;
+    getTrainTypes?: () => Record<
+      string,
+      { stats?: Record<string, number>; allowGradeCrossing?: boolean; allowAtGradeRoadCrossing?: boolean; gradeCrossingTphLimit?: Record<string, number | null> }
+    >;
     modifyTrainType?: (id: string, updates: unknown) => void;
   };
   const root = api as unknown as { modifyConstants?: (c: Record<string, number>) => void };
+
+  // The highway/runway at-grade block is NOT a train flag or constant — it lives in
+  // the road collision INDEX (an rbush whose leaf items carry `type: 'road' | 'highway'
+  // | 'runway'`). The validator blocks item.type 'highway'/'runway'; nothing in the
+  // official API touches it, so we reach it via the internal store bridge (the same one
+  // Copy Paste / Track Visualizer use) and retype those obstacles to plain 'road'.
+  type RoadNode = {
+    type?: string;
+    feature?: { properties?: { roadClass?: string; __taClass?: string } };
+    children?: RoadNode[];
+    __taType?: string;
+  };
+  const bridge = (): { roadsIndex?: { data?: RoadNode }; setRoadsIndex?: (i: unknown) => void } | null => {
+    try {
+      return (
+        (window as unknown as { __subwayBuilder_storeCallbacks__?: { getState?: () => Record<string, unknown> } })
+          .__subwayBuilder_storeCallbacks__?.getState?.() as never
+      ) ?? null;
+    } catch {
+      return null;
+    }
+  };
+  // Per-road-class grade-crossing trains/hour cap (vanilla: highway is null = disallowed).
+  const GC_TPH_ANARCHY: Record<string, number> = { highway: 999, major: 999, medium: 999, minor: 999 };
+
+  /**
+   * Retype highway/runway obstacles in the road collision index to plain roads (ON),
+   * or restore them (OFF). Idempotent and self-describing (stores the original type on
+   * the node), so it survives re-applies and needs no separate persistence — the index
+   * is rebuilt per city, and we re-run on every city load.
+   */
+  const reclassifyObstacles = (enable: boolean): void => {
+    try {
+      const st = bridge();
+      const root2 = st?.roadsIndex?.data;
+      if (!root2 || typeof st?.setRoadsIndex !== 'function') return;
+      let changed = 0;
+      const visit = (n: RoadNode | undefined): void => {
+        if (!n || typeof n !== 'object') return;
+        if (n.feature) {
+          const props = n.feature.properties;
+          if (enable) {
+            if (n.type === 'highway' || n.type === 'runway') {
+              n.__taType = n.type;
+              n.type = 'road';
+              changed++;
+            }
+            // The highway gate is (item.type === 'highway') OR (roadClass === 'highway'),
+            // so retype BOTH — but only inside the collision index, so rendering (which
+            // reads roadsGeojson) is left untouched.
+            if (props && props.roadClass === 'highway') {
+              props.__taClass = props.roadClass;
+              props.roadClass = 'major';
+              changed++;
+            }
+          } else {
+            if (n.__taType) {
+              n.type = n.__taType;
+              delete n.__taType;
+              changed++;
+            }
+            if (props && props.__taClass) {
+              props.roadClass = props.__taClass;
+              delete props.__taClass;
+              changed++;
+            }
+          }
+        }
+        if (Array.isArray(n.children)) for (const c of n.children) visit(c);
+      };
+      visit(root2);
+      if (changed) st.setRoadsIndex(st.roadsIndex);
+    } catch (err) {
+      console.error(`${TAG} reclassifyObstacles failed:`, err);
+    }
+  };
+
+  /**
+   * Lift the ocean-floor rule: the validator blocks track sitting above the seabed
+   * (per-cell `depth_min` in the ocean depth detector) unless it's elevated. Push each
+   * cell's floor "up" so any track counts as deeper than it (ON), or restore the
+   * captured original (OFF). Self-describing + rebuilt per city, like reclassifyObstacles.
+   */
+  const reclassifyOcean = (enable: boolean): void => {
+    try {
+      const st = bridge() as { oceanDepthDetector?: { depthsMap?: Map<unknown, { depth_min?: number; __taDepth?: number }> } } | null;
+      const dm = st?.oceanDepthDetector?.depthsMap;
+      if (!dm || typeof dm.values !== 'function') return;
+      for (const cell of dm.values()) {
+        if (!cell || typeof cell.depth_min !== 'number') continue;
+        if (enable) {
+          if (cell.__taDepth === undefined) {
+            cell.__taDepth = cell.depth_min;
+            cell.depth_min = 1e9; // floor above everything → any track is deeper → passes
+          }
+        } else if (cell.__taDepth !== undefined) {
+          cell.depth_min = cell.__taDepth;
+          delete cell.__taDepth;
+        }
+      }
+      // No setOceanDepthDetector exists; the validator reads the map live, so mutating
+      // it in place is enough.
+    } catch (err) {
+      console.error(`${TAG} reclassifyOcean failed:`, err);
+    }
+  };
   // Read the live constant set so we only write keys this game version actually has
   // (the length-constant names differ between 1.3.x and 1.4.x). Absent → don't filter.
   const getConstants = (api.utils as unknown as { getConstants?: () => Record<string, number> }).getConstants;
@@ -129,17 +242,19 @@ if (!api) {
   // ---- captured per-train stat defaults (sentinel-guarded + persisted) ----
   const origStats: Record<string, Record<string, number>> = {}; // [trainId][statKey] = clean default
   const origRoad: Record<string, boolean> = {};
+  const origGcTph: Record<string, Record<string, number | null> | null> = {}; // captured gradeCrossingTphLimit
 
   const persistOrigs = (): void => {
     try {
       void store.set?.(ORIG_STATS_KEY, origStats);
       void store.set?.(ORIG_ROAD_KEY, origRoad);
+      void store.set?.(ORIG_GCTPH_KEY, origGcTph);
     } catch {
       /* ignore */
     }
   };
 
-  const captureStats = (types: Record<string, { stats?: Record<string, number>; allowGradeCrossing?: boolean; allowAtGradeRoadCrossing?: boolean }>): void => {
+  const captureStats = (types: Record<string, { stats?: Record<string, number>; allowGradeCrossing?: boolean; allowAtGradeRoadCrossing?: boolean; gradeCrossingTphLimit?: Record<string, number | null> }>): void => {
     let changed = false;
     for (const id of Object.keys(types)) {
       const stats = types[id]?.stats ?? {};
@@ -163,6 +278,11 @@ if (!api) {
       // once only (the flag has no reliable sentinel; the persisted value is authoritative).
       if (origRoad[id] == null) {
         origRoad[id] = types[id]?.allowGradeCrossing ?? types[id]?.allowAtGradeRoadCrossing ?? false;
+        changed = true;
+      }
+      // gradeCrossingTphLimit: capture once (null = train originally had none, e.g. subways).
+      if (!(id in origGcTph)) {
+        origGcTph[id] = types[id]?.gradeCrossingTphLimit ?? null;
         changed = true;
       }
     }
@@ -222,15 +342,23 @@ if (!api) {
           }
         }
       }
-      const update: { stats: Record<string, number>; allowGradeCrossing?: boolean; allowAtGradeRoadCrossing?: boolean } = {
+      const update: {
+        stats: Record<string, number>;
+        allowGradeCrossing?: boolean;
+        allowAtGradeRoadCrossing?: boolean;
+        gradeCrossingTphLimit?: Record<string, number | null> | null;
+      } = {
         stats: { ...cur, ...statUpdates },
       };
       if (roadLever) {
-        const on = enabled.has(roadLever.id) ? true : origRoad[id] ?? false;
+        const on = enabled.has(roadLever.id);
         // Set BOTH names: allowGradeCrossing (1.4.x, shown in the Train Types panel)
         // and allowAtGradeRoadCrossing (1.3.x + the 1.4.x road-intersection validator).
-        update.allowGradeCrossing = on;
-        update.allowAtGradeRoadCrossing = on;
+        update.allowGradeCrossing = on ? true : origRoad[id] ?? false;
+        update.allowAtGradeRoadCrossing = update.allowGradeCrossing;
+        // Lift the per-road-class grade-crossing trains/hour cap (highway is null by
+        // default) so crossings aren't throttled; restore the captured original when off.
+        update.gradeCrossingTphLimit = on ? GC_TPH_ANARCHY : origGcTph[id] ?? null;
       }
       try {
         trains.modifyTrainType?.(id, update);
@@ -238,6 +366,14 @@ if (!api) {
         console.error(`${TAG} failed to modify ${id}:`, err);
       }
     }
+
+    // Highway/runway at-grade crossings + the ocean-floor rule are gated in collision
+    // indexes (rbush item.type / ocean depth cells), not by any train flag or constant —
+    // relax them directly via the store bridge.
+    if (roadLever) reclassifyObstacles(enabled.has(roadLever.id));
+    const oceanLever = LEVERS.find((l) => l.ocean);
+    if (oceanLever) reclassifyOcean(enabled.has(oceanLever.id));
+
     console.log(`${TAG} applied (${enabled.size}/${LEVERS.length} features on).`);
     return true;
   };
@@ -359,9 +495,41 @@ if (!api) {
         .catch(() => {
           /* ignore */
         });
+      Promise.resolve(store.get?.(ORIG_GCTPH_KEY))
+        .then((saved) => {
+          if (!saved || typeof saved !== 'object') return;
+          for (const id of Object.keys(saved as Record<string, unknown>)) {
+            if (!(id in origGcTph)) origGcTph[id] = (saved as Record<string, Record<string, number | null> | null>)[id];
+          }
+        })
+        .catch(() => {
+          /* ignore */
+        });
     } catch {
       /* ignore */
     }
+  };
+
+  // roadsIndex loads with the city and can lag the first applyAll — retry the obstacle
+  // reclassification until it's populated (so highway/runway crossings unlock on load).
+  const reclassifyWhenReady = (): void => {
+    let tries = 0;
+    let roadDone = false;
+    let oceanDone = false;
+    const tick = (): void => {
+      const st = bridge() as { roadsIndex?: { data?: unknown }; oceanDepthDetector?: { depthsMap?: unknown } } | null;
+      if (!roadDone && st?.roadsIndex?.data) {
+        reclassifyObstacles(enabled.has('roadCrossing'));
+        roadDone = true;
+      }
+      if (!oceanDone && st?.oceanDepthDetector?.depthsMap) {
+        reclassifyOcean(enabled.has('oceanFloor'));
+        oceanDone = true;
+      }
+      if ((roadDone && oceanDone) || ++tries >= 40) return;
+      setTimeout(tick, 500);
+    };
+    tick();
   };
 
   // The settings panel doesn't survive the in-game ↔ main-menu transition on its
@@ -389,9 +557,16 @@ if (!api) {
   api.hooks.onMapReady(async () => {
     refreshUI();
     applyWhenReady();
+    reclassifyWhenReady();
   });
-  hook('onCityLoad', applyWhenReady);
-  hook('onGameLoaded', applyWhenReady);
+  hook('onCityLoad', () => {
+    applyWhenReady();
+    reclassifyWhenReady();
+  });
+  hook('onGameLoaded', () => {
+    applyWhenReady();
+    reclassifyWhenReady();
+  });
   hook('onGameInit', refreshUI);
   hook('onGameEnd', () => {
     // re-register immediately + after the menu has had time to mount
