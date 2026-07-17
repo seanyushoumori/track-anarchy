@@ -12,7 +12,7 @@
  * record a value that already equals our anarchy value.
  */
 
-const MOD_VERSION = '1.3.0';
+const MOD_VERSION = '1.3.1';
 const TAG = '[Track Anarchy]';
 const STORAGE_KEY = 'track-anarchy:enabled';
 // The game keeps modified train-type stats across a reload, but this mod's module
@@ -215,6 +215,32 @@ if (!api) {
   // Read the live constant set so we only write keys this game version actually has
   // (the length-constant names differ between 1.3.x and 1.4.x). Absent → don't filter.
   const getConstants = (api.utils as unknown as { getConstants?: () => Record<string, number> }).getConstants;
+
+  /**
+   * Road-crossing elevation "dead zone": track that's below grade but not deep enough to
+   * tunnel under a road (or above grade but not high enough to bridge over) — roughly the
+   * -4m..+5m band (TRENCHED..ELEVATED thresholds) — can't cross a road. Widen
+   * STREET_RUNNING.ELEVATION_TOLERANCE (vanilla 0.01m) so that whole band counts as an
+   * at-grade crossing; real tunnels/bridges beyond it are unaffected. Mutated in place
+   * (self-describing) — constants persist across ⌘R + reset on full relaunch, like the rest.
+   */
+  const setRoadElevTolerance = (enable: boolean): void => {
+    try {
+      const c = getConstants?.() as Record<string, unknown> | undefined;
+      const sr = c?.STREET_RUNNING as { ELEVATION_TOLERANCE?: number; __taTol?: number } | undefined;
+      if (!sr || typeof sr.ELEVATION_TOLERANCE !== 'number') return; // older version lacks it → skip
+      if (enable) {
+        if (sr.__taTol === undefined) sr.__taTol = sr.ELEVATION_TOLERANCE;
+        sr.ELEVATION_TOLERANCE = 5;
+      } else if (sr.__taTol !== undefined) {
+        sr.ELEVATION_TOLERANCE = sr.__taTol;
+        delete sr.__taTol;
+      }
+    } catch (err) {
+      console.error(`${TAG} setRoadElevTolerance failed:`, err);
+    }
+  };
+
   const store = api.storage as unknown as { get?: (k: string) => unknown; set?: (k: string, v: unknown) => void };
   const ui = api.ui as unknown as {
     registerComponent?: (p: string, o: { id: string; component: unknown }) => void;
@@ -370,7 +396,10 @@ if (!api) {
     // Highway/runway at-grade crossings + the ocean-floor rule are gated in collision
     // indexes (rbush item.type / ocean depth cells), not by any train flag or constant —
     // relax them directly via the store bridge.
-    if (roadLever) reclassifyObstacles(enabled.has(roadLever.id));
+    if (roadLever) {
+      reclassifyObstacles(enabled.has(roadLever.id));
+      setRoadElevTolerance(enabled.has(roadLever.id));
+    }
     const oceanLever = LEVERS.find((l) => l.ocean);
     if (oceanLever) reclassifyOcean(enabled.has(oceanLever.id));
 

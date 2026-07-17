@@ -2,7 +2,7 @@
   "id": "track-anarchy",
   "name": "Track Anarchy",
   "description": "Take the guardrails off. Track Anarchy removes Subway Builder's construction limits for every train type: minimum curve radius (track and stations), maximum grade, track/station/tunnel clearance, minimum parallel-track spacing, the build-height floor and ceiling, the building-foundation gap, minimum and maximum station lengths, minimum and maximum track segment lengths, at-grade crossings of roads, highways AND airport runways/taxiways, and the ocean-floor rule (build track below the seabed). Each is a separate toggle in the game's Settings menu. A few rules still stay hardcoded — stations must start and end level, different track types can't connect, and there's no building or track overlap. Turn any lever off anytime to return to vanilla.",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "author": {
     "name": "abadsinger"
   },
