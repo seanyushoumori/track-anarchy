@@ -12,7 +12,7 @@
  * record a value that already equals our anarchy value.
  */
 
-const MOD_VERSION = '1.3.1';
+const MOD_VERSION = '1.3.2';
 const TAG = '[Track Anarchy]';
 const STORAGE_KEY = 'track-anarchy:enabled';
 // The game keeps modified train-type stats across a reload, but this mod's module
@@ -39,7 +39,11 @@ interface Lever {
 }
 
 const LEVERS: Lever[] = [
-  { id: 'curves', label: 'Sharp curves', stats: { minTurnRadius: 5, minStationTurnRadius: 5, maxLateralAcceleration: 1000 } },
+  { id: 'curves', label: 'Sharp curves', stats: { minTurnRadius: 5, minStationTurnRadius: 5 } },
+  // maxLateralAcceleration drives the CURVE SPEED LIMIT (v ≈ √(a·r)), so cranking it
+  // makes every track run at max speed regardless of how tight the curve is. Split out
+  // as its own opt-in lever so "Sharp curves" keeps realistic curve speeds by default.
+  { id: 'curveSpeed', label: 'Unlimited curve speed', stats: { maxLateralAcceleration: 1000 }, defaultOff: true },
   { id: 'grades', label: 'Steep grades', stats: { maxSlopePercentage: 1_000_000 } },
   { id: 'clearance', label: 'Zero track clearance', stats: { trackClearance: 0 } },
   { id: 'spacing', label: 'Overlapping parallel tracks', stats: { parallelTrackSpacing: 0 }, defaultOff: true },
